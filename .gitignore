@@ -11,7 +11,7 @@
 *.mod
 
 # Executable files
-tb_gra
+test
 
 # Libraries
 *.lib

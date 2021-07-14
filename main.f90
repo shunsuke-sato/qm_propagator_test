@@ -18,6 +18,12 @@ module global_variables
 
 ! finite difference coefficients
   real(8) :: c0,c1,c2,g1,g2
+
+! time propagation
+  real(8) :: Tprop, dt
+  integer :: nt
+  real(8),allocatable :: act(:)
+
 end module global_variables
 !-------------------------------------------------------------------------------
 program main
@@ -27,6 +33,7 @@ program main
 
   call preparation
   call calc_ground_state
+  call calc_time_propagation
 
 
 end program main
@@ -125,11 +132,214 @@ subroutine calc_ground_state
 
 end subroutine calc_ground_state
 !-------------------------------------------------------------------------------
+subroutine calc_time_propagation
+  use global_variables
+  implicit none
+  real(8):: tt, jt_t
+  integer :: it
+
+  zpsi = psi
+
+  Tprop = 800d0
+  dt = 0.01d0
+  nt = Tprop/dt
+  call set_field
+
+  open(30,file='jt_act.out')
+  call calc_current(zpsi,act(0), jt_t)
+  write(30,"(999e26.16e3)")0d0, jt_t, act(0),sum(abs(zpsi)**2)*dx
+
+
+  do it = 0, nt-1
+
+    call dt_evolve(it)
+
+    call calc_current(zpsi,act(it+1), jt_t)
+    write(30,"(999e26.16e3)")(it+1)*dt, jt_t, act(it+1),sum(abs(zpsi)**2)*dx
+
+  end do
+  close(30)
+
+end subroutine calc_time_propagation
 !-------------------------------------------------------------------------------
+subroutine set_field
+  use global_variables
+  implicit none
+  integer :: it
+  real(8) :: tt
+
+  allocate(act(0:nt))
+  act = 0d0
+
+  do it = 0, nt
+    tt = dt*it
+    if(tt<Tprop)then
+      act(it) = 2d0*pi/length_x*sin(pi*tt/tprop)**4
+    end if
+  end do
+
+
+end subroutine set_field
 !-------------------------------------------------------------------------------
+subroutine dt_evolve(it)
+  use global_variables
+  implicit none
+  integer,intent(in) :: it
+  real(8) :: act_t
+  real(8) :: dt_t
+
+  dt_t = 0.5d0*dt
+
+  act_t = act(it)
+  call dt_evolve_state(act_t,dt_t)
+
+  act_t = act(it+1)
+  call dt_evolve_state(act_t,dt_t)
+
+
+end subroutine dt_evolve
 !-------------------------------------------------------------------------------
+subroutine dt_evolve_state(act_t,dt_t)
+  use global_variables
+  implicit none
+  real(8),intent(in) :: act_t, dt_t
+
+  call taylor_expansion(act_t, dt_t)
+!  call lanczos(act_t, dt_t)
+!  call simple_krylov(act_t, dt_t) !explicit orthogonalization 
+
+end subroutine dt_evolve_state
 !-------------------------------------------------------------------------------
+subroutine taylor_expansion(act_t, dt_t)
+  use global_variables
+  implicit none
+  integer,parameter :: n_taylor = 4
+  real(8),intent(in) :: act_t, dt_t
+  complex(8) :: zpsi_t(nx), zhpsi_t(nx)
+  complex(8) :: zfact
+  integer :: iexp
+
+
+  zpsi_t = zpsi
+  zfact = 1d0
+  do iexp = 1, n_taylor
+    zfact = zfact*(-zI*dt_t)/iexp
+    call calc_zhpsi(zpsi_t, zhpsi_t, act_t)
+
+    zpsi = zpsi + zfact*zhpsi_t
+    zpsi_t = zhpsi_t
+
+  end do
+
+
+end subroutine taylor_expansion
 !-------------------------------------------------------------------------------
+subroutine calc_zhpsi(zpsi_t, zhpsi_t, act_t)
+  use global_variables
+  implicit none
+  complex(8),intent(in) :: zpsi_t(nx)
+  complex(8),intent(out) :: zhpsi_t(nx)
+  real(8),intent(in) :: act_t
+  real(8) :: c0t,c1t,c2t,g1t,g2t
+  integer :: ix
+
+  c0t = -0.5d0*c0
+  c1t = -0.5d0*c1
+  c2t = -0.5d0*c2
+  g1t = g1*act_t
+  g2t = g2*act_t
+
+  zhpsi_t = vpot*zpsi_t
+  
+  ix = 1
+  zhpsi_t(ix) = zhpsi_t(ix) +c0t*zpsi_t(ix) &
+                            +c1t*(zpsi_t(ix+1)+zpsi_t(ix-1+nx)) &
+                            +c2t*(zpsi_t(ix+2)+zpsi_t(ix-2+nx)) &
+                            -zi*(&
+                            g1t*(zpsi_t(ix+1)-zpsi_t(ix-1+nx)) &
+                           +g2t*(zpsi_t(ix+2)-zpsi_t(ix-2+nx)))
+
+  ix = 2
+  zhpsi_t(ix) = zhpsi_t(ix) +c0t*zpsi_t(ix) &
+                            +c1t*(zpsi_t(ix+1)+zpsi_t(ix-1)) &
+                            +c2t*(zpsi_t(ix+2)+zpsi_t(ix-2+nx)) &
+                            -zi*(&
+                            g1t*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                           +g2t*(zpsi_t(ix+2)-zpsi_t(ix-2+nx)))
+
+  do ix = 1+2, nx-2
+    zhpsi_t(ix) = zhpsi_t(ix) +c0t*zpsi_t(ix) &
+                              +c1t*(zpsi_t(ix+1)+zpsi_t(ix-1)) &
+                              +c2t*(zpsi_t(ix+2)+zpsi_t(ix-2)) &
+                              -zi*(&
+                              g1t*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                             +g2t*(zpsi_t(ix+2)-zpsi_t(ix-2)))
+  end do
+  
+  ix = nx-1
+  zhpsi_t(ix) = zhpsi_t(ix) +c0t*zpsi_t(ix) &
+                            +c1t*(zpsi_t(ix+1)+zpsi_t(ix-1)) &
+                            +c2t*(zpsi_t(ix+2-nx)+zpsi_t(ix-2)) &
+                            -zi*(&
+                            g1t*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                           +g2t*(zpsi_t(ix+2-nx)-zpsi_t(ix-2)))
+
+  ix = nx
+  zhpsi_t(ix) = zhpsi_t(ix) +c0t*zpsi_t(ix) &
+                            +c1t*(zpsi_t(ix+1-nx)+zpsi_t(ix-1)) &
+                            +c2t*(zpsi_t(ix+2-nx)+zpsi_t(ix-2)) &
+                            -zi*(&
+                            g1t*(zpsi_t(ix+1-nx)-zpsi_t(ix-1)) &
+                           +g2t*(zpsi_t(ix+2-nx)-zpsi_t(ix-2)))
+
+
+end subroutine calc_zhpsi
+!-------------------------------------------------------------------------------
+subroutine calc_current(zpsi_t,act_t, jt_t)
+  use global_variables
+  implicit none
+  complex(8),intent(in) :: zpsi_t(nx)
+  real(8),intent(in) :: act_t
+  real(8),intent(out) :: jt_t
+  complex(8) :: zgpsi_t(nx)
+  integer :: ix
+
+  zgpsi_t = act_t*zpsi_t
+
+  ix = 1
+  zgpsi_t(ix) = zgpsi_t(ix) -zi*(&
+                            g1*(zpsi_t(ix+1)-zpsi_t(ix-1+nx)) &
+                           +g2*(zpsi_t(ix+2)-zpsi_t(ix-2+nx)))
+
+  ix = 2
+  zgpsi_t(ix) = zgpsi_t(ix) -zi*(&
+                            g1*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                           +g2*(zpsi_t(ix+2)-zpsi_t(ix-2+nx)))
+
+
+  do ix = 1+2, nx-2
+    zgpsi_t(ix) = zgpsi_t(ix) -zi*(&
+                            g1*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                           +g2*(zpsi_t(ix+2)-zpsi_t(ix-2)))
+
+  end do
+  
+
+  ix = nx-1
+  zgpsi_t(ix) = zgpsi_t(ix) -zi*(&
+                            g1*(zpsi_t(ix+1)-zpsi_t(ix-1)) &
+                           +g2*(zpsi_t(ix+2-nx)-zpsi_t(ix-2)))
+
+  ix = nx
+  zgpsi_t(ix) = zgpsi_t(ix) -zi*(&
+                            g1*(zpsi_t(ix+1-nx)-zpsi_t(ix-1)) &
+                           +g2*(zpsi_t(ix+2-nx)-zpsi_t(ix-2)))
+
+
+  jt_t = sum(conjg(zpsi_t)*zgpsi_t)*dx
+
+
+end subroutine calc_current
 !-------------------------------------------------------------------------------
 !-------------------------------------------------------------------------------
 !-------------------------------------------------------------------------------
